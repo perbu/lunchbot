@@ -1,0 +1,7 @@
+# Copy this file to config.yaml and fill in your values
+slack_app_token: "xapp-your-app-token"
+slack_bot_token: "xoxb-your-bot-token"
+channel: "C1234567890"  # Slack channel ID where the bot listens
+report_user: "U0987654321"  # Slack user ID who receives daily reports
+baseline: 10  # Default number of lunches per day
+db_path: "lunchbot.db"  # Path to SQLite database file
