@@ -32,7 +32,8 @@ const (
 	helpMessage = "Available commands:\n" +
 		"• `(add|detract) <count> (today|tomorrow) <participants>` (e.g., `add 2 today @user1 @user2`)\n" +
 		"• `status [today|tomorrow|YYYY-MM-DD]` (e.g., `status tomorrow`)\n" +
-		"• `vacation <@user> YYYY-MM-DD YYYY-MM-DD` (e.g., `vacation @user1 2024-12-20 2024-12-25`)"
+		"• `vacation <@user> YYYY-MM-DD YYYY-MM-DD` (e.g., `vacation @user1 2024-12-20 2024-12-25`) \n" +
+		"Source available at https://github.com/perbu/lunchbot"
 )
 
 // Pre-compiled regexes for command parsing
