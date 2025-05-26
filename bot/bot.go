@@ -1,6 +1,8 @@
 package bot
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"github.com/perbu/lunchbot/config"
 	"github.com/perbu/lunchbot/storage"
@@ -61,7 +63,7 @@ func (b *Bot) Close() error {
 	return nil
 }
 
-func (b *Bot) Start() {
+func (b *Bot) Start(ctx context.Context) error {
 	go func() {
 		for evt := range b.socketClient.Events {
 			switch evt.Type {
@@ -76,10 +78,16 @@ func (b *Bot) Start() {
 		}
 	}()
 
-	b.socketClient.Run()
+	if err := b.socketClient.RunContext(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return fmt.Errorf("b.socketClient.Run(): %w", err)
+	}
+	return nil
 }
 
-func (b *Bot) StartScheduler() {
+func (b *Bot) StartScheduler(ctx context.Context) {
 	location, err := time.LoadLocation("Europe/Oslo")
 	if err != nil {
 		log.Printf("Failed to load timezone: %v", err)
@@ -87,7 +95,10 @@ func (b *Bot) StartScheduler() {
 	}
 
 	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+	go func() {
+		<-ctx.Done()
+		ticker.Stop()
+	}()
 
 	for range ticker.C {
 		now := time.Now().In(location)

@@ -1,17 +1,20 @@
 package storage
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 
-	"zombiezen.com/go/sqlite"
-	"zombiezen.com/go/sqlite/sqlitex"
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
 )
 
 type Storage struct {
-	db *sqlite.Conn
+	db      *sql.DB
+	queries *Queries
 }
 
 type LunchRecord struct {
@@ -33,15 +36,24 @@ type VacationRecord struct {
 }
 
 func New(dbPath string) (*Storage, error) {
-	db, err := sqlite.OpenConn(dbPath, sqlite.OpenCreate|sqlite.OpenReadWrite)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	storage := &Storage{db: db}
-	if err := storage.initDB(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	// Run migrations
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		return nil, fmt.Errorf("failed to set dialect: %w", err)
+	}
+
+	if err := goose.Up(db, "migrations"); err != nil {
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	queries := NewQueries(db)
+	storage := &Storage{
+		db:      db,
+		queries: queries,
 	}
 
 	return storage, nil
@@ -54,91 +66,51 @@ func (s *Storage) Close() error {
 	return nil
 }
 
-func (s *Storage) initDB() error {
-	createLunchesTable := `
-		CREATE TABLE IF NOT EXISTS lunches (
-			id INTEGER PRIMARY KEY,
-			date TEXT NOT NULL,
-			user_id TEXT NOT NULL,
-			verb TEXT NOT NULL,
-			count INTEGER NOT NULL,
-			participants TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);`
-
-	createVacationsTable := `
-		CREATE TABLE IF NOT EXISTS vacations (
-			id INTEGER PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			date_from TEXT NOT NULL,
-			date_to TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);`
-
-	createIndexes := `
-		CREATE INDEX IF NOT EXISTS idx_vacations_user ON vacations(user_id);
-		CREATE INDEX IF NOT EXISTS idx_vacations_range ON vacations(date_from, date_to);`
-
-	for _, query := range []string{createLunchesTable, createVacationsTable, createIndexes} {
-		if err := sqlitex.Execute(s.db, query, nil); err != nil {
-			return fmt.Errorf("failed to execute query: %w", err)
-		}
-	}
-
-	return nil
-}
-
 func (s *Storage) AddLunchRecord(date, userID, verb string, count int, participants []string) error {
 	participantsJSON, err := json.Marshal(participants)
 	if err != nil {
 		return fmt.Errorf("failed to marshal participants: %w", err)
 	}
 
-	query := `INSERT INTO lunches (date, user_id, verb, count, participants) VALUES (?, ?, ?, ?, ?)`
-	return sqlitex.Execute(s.db, query, &sqlitex.ExecOptions{
-		Args: []interface{}{date, userID, verb, count, string(participantsJSON)},
+	return s.queries.AddLunchRecord(context.Background(), AddLunchRecordParams{
+		Date:         date,
+		UserID:       userID,
+		Verb:         verb,
+		Count:        int64(count),
+		Participants: string(participantsJSON),
 	})
 }
 
 func (s *Storage) AddVacationRecord(userID, dateFrom, dateTo string) error {
-	query := `INSERT INTO vacations (user_id, date_from, date_to) VALUES (?, ?, ?)`
-	return sqlitex.Execute(s.db, query, &sqlitex.ExecOptions{
-		Args: []interface{}{userID, dateFrom, dateTo},
+	return s.queries.AddVacationRecord(context.Background(), AddVacationRecordParams{
+		UserID:   userID,
+		DateFrom: dateFrom,
+		DateTo:   dateTo,
 	})
 }
 
 func (s *Storage) GetLunchRecordsForDate(date string) ([]LunchRecord, error) {
+	lunches, err := s.queries.GetLunchRecordsForDate(context.Background(), date)
+	if err != nil {
+		return nil, err
+	}
+
 	var records []LunchRecord
-	
-	query := `SELECT id, date, user_id, verb, count, participants, created_at FROM lunches WHERE date = ?`
-	stmt := s.db.Prep(query)
-	defer stmt.Finalize()
-	stmt.BindText(1, date)
-
-	for {
-		hasRow, err := stmt.Step()
-		if err != nil {
-			return nil, fmt.Errorf("error querying lunches: %w", err)
-		}
-		if !hasRow {
-			break
-		}
-
+	for _, lunch := range lunches {
 		var participants []string
-		participantsJSON := stmt.ColumnText(5)
-		if err := json.Unmarshal([]byte(participantsJSON), &participants); err != nil {
+		if err := json.Unmarshal([]byte(lunch.Participants), &participants); err != nil {
 			log.Printf("Failed to unmarshal participants: %v", err)
 			participants = []string{}
 		}
 
 		record := LunchRecord{
-			ID:           stmt.ColumnInt(0),
-			Date:         stmt.ColumnText(1),
-			UserID:       stmt.ColumnText(2),
-			Verb:         stmt.ColumnText(3),
-			Count:        stmt.ColumnInt(4),
+			ID:           int(lunch.ID),
+			Date:         lunch.Date,
+			UserID:       lunch.UserID,
+			Verb:         lunch.Verb,
+			Count:        int(lunch.Count),
 			Participants: participants,
-			CreatedAt:    stmt.ColumnText(6),
+			CreatedAt:    lunch.CreatedAt.Time.Format(time.RFC3339),
 		}
 		records = append(records, record)
 	}
@@ -147,21 +119,11 @@ func (s *Storage) GetLunchRecordsForDate(date string) ([]LunchRecord, error) {
 }
 
 func (s *Storage) GetVacationCountForDate(date string) (int, error) {
-	query := `SELECT COUNT(*) FROM vacations WHERE date_from <= ? AND date_to >= ?`
-	stmt := s.db.Prep(query)
-	defer stmt.Finalize()
-	stmt.BindText(1, date)
-	stmt.BindText(2, date)
-
-	hasRow, err := stmt.Step()
-	if err != nil {
-		return 0, fmt.Errorf("error querying vacations: %w", err)
-	}
-	if !hasRow {
-		return 0, nil
-	}
-
-	return stmt.ColumnInt(0), nil
+	count, err := s.queries.GetVacationCountForDate(context.Background(), GetVacationCountForDateParams{
+		DateFrom: date,
+		DateTo:   date,
+	})
+	return int(count), err
 }
 
 func (s *Storage) CalculateTotal(date string, baseline int) (int, error) {

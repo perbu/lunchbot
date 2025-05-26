@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"github.com/perbu/lunchbot/bot"
 	"github.com/perbu/lunchbot/config"
 	"log"
 	"os"
 	"os/signal"
-	"syscall"
 )
 
 func main() {
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
 		log.Fatal("Failed to load config:", err)
@@ -19,21 +22,12 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to create bot:", err)
 	}
-	defer func() {
-		if err := lunchBot.Close(); err != nil {
-			log.Printf("Error closing bot: %v", err)
-		}
-	}()
 
 	// Start the scheduler in a separate goroutine
-	go lunchBot.StartScheduler()
-
-	// Handle graceful shutdown
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go lunchBot.StartScheduler(ctx)
 
 	go func() {
-		<-c
+		<-ctx.Done()
 		log.Println("Shutting down...")
 		if err := lunchBot.Close(); err != nil {
 			log.Printf("Error during shutdown: %v", err)
@@ -43,5 +37,7 @@ func main() {
 
 	// Start the bot (this will block)
 	log.Println("Starting lunchbot...")
-	lunchBot.Start()
+	if err := lunchBot.Start(ctx); err != nil {
+		log.Fatal("Failed to start bot:", err)
+	}
 }

@@ -1,0 +1,13 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "storage/queries.sql"
+    schema: "migrations"
+    gen:
+      go:
+        package: "storage"
+        out: "storage"
+        sql_package: "database/sql"
+        overrides:
+          - db_type: "TEXT"
+            go_type: "string"

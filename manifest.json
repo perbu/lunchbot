@@ -1,0 +1,34 @@
+{
+  "_metadata": {
+    "major_version": 2,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "Lunchbot",
+    "long_description": "A Slack bot that helps track lunch orders and participant counts for your team. Features automated daily reports, vacation management, and customizable baseline configurations.",
+    "description": "Track team lunch orders with automated reports and vacation deductions.",
+    "background_color": "#FF6B35"
+  },
+  "settings": {
+    "socket_mode_enabled": true,
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention"
+      ]
+    }
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "lunchbot"
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "channels:read"
+      ]
+    }
+  }
+}
