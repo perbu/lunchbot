@@ -27,7 +27,8 @@
       "bot": [
         "app_mentions:read",
         "chat:write",
-        "channels:read"
+        "channels:read",
+        "users:read"
       ]
     }
   }

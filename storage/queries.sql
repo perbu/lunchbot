@@ -15,3 +15,8 @@ WHERE date = ?;
 SELECT COUNT(*) as count
 FROM vacations 
 WHERE date_from <= ? AND date_to >= ?;
+
+-- name: GetVacationsForDate :many
+SELECT user_id
+FROM vacations 
+WHERE date_from <= ? AND date_to >= ?;

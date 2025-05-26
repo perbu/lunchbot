@@ -126,6 +126,13 @@ func (s *Storage) GetVacationCountForDate(date string) (int, error) {
 	return int(count), err
 }
 
+func (s *Storage) GetVacationsForDate(date string) ([]string, error) {
+	return s.queries.GetVacationsForDate(context.Background(), GetVacationsForDateParams{
+		DateFrom: date,
+		DateTo:   date,
+	})
+}
+
 func (s *Storage) CalculateTotal(date string, baseline int) (int, error) {
 	total := baseline
 

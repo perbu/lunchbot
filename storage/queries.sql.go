@@ -103,3 +103,37 @@ func (q *Queries) GetVacationCountForDate(ctx context.Context, arg GetVacationCo
 	err := row.Scan(&count)
 	return count, err
 }
+
+const getVacationsForDate = `-- name: GetVacationsForDate :many
+SELECT user_id
+FROM vacations 
+WHERE date_from <= ? AND date_to >= ?
+`
+
+type GetVacationsForDateParams struct {
+	DateFrom string
+	DateTo   string
+}
+
+func (q *Queries) GetVacationsForDate(ctx context.Context, arg GetVacationsForDateParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, getVacationsForDate, arg.DateFrom, arg.DateTo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var user_id string
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
