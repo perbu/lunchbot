@@ -5,11 +5,17 @@ import (
 	"github.com/perbu/lunchbot/bot"
 	"github.com/perbu/lunchbot/config"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 )
 
 func main() {
+	// Initialize structured logger with DEBUG level
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	slog.SetDefault(logger)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -18,7 +24,7 @@ func main() {
 		log.Fatal("Failed to load config:", err)
 	}
 
-	lunchBot, err := bot.New(cfg)
+	lunchBot, err := bot.New(cfg, logger)
 	if err != nil {
 		log.Fatal("Failed to create bot:", err)
 	}
@@ -28,16 +34,17 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
-		log.Println("Shutting down...")
+		logger.Info("Shutting down...")
 		if err := lunchBot.Close(); err != nil {
-			log.Printf("Error during shutdown: %v", err)
+			logger.Error("Error during shutdown", "error", err)
 		}
 		os.Exit(0)
 	}()
 
 	// Start the bot (this will block)
-	log.Println("Starting lunchbot...")
+	logger.Info("Starting lunchbot...")
 	if err := lunchBot.Start(ctx); err != nil {
-		log.Fatal("Failed to start bot:", err)
+		logger.Error("Failed to start bot", "error", err)
+		os.Exit(1)
 	}
 }

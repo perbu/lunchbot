@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -15,6 +15,7 @@ import (
 type Storage struct {
 	db      *sql.DB
 	queries *Queries
+	logger  *slog.Logger
 }
 
 type LunchRecord struct {
@@ -35,7 +36,7 @@ type VacationRecord struct {
 	CreatedAt string `json:"created_at"`
 }
 
-func New(dbPath string) (*Storage, error) {
+func New(dbPath string, logger *slog.Logger) (*Storage, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
@@ -54,6 +55,7 @@ func New(dbPath string) (*Storage, error) {
 	storage := &Storage{
 		db:      db,
 		queries: queries,
+		logger:  logger,
 	}
 
 	return storage, nil
@@ -99,7 +101,7 @@ func (s *Storage) GetLunchRecordsForDate(date string) ([]LunchRecord, error) {
 	for _, lunch := range lunches {
 		var participants []string
 		if err := json.Unmarshal([]byte(lunch.Participants), &participants); err != nil {
-			log.Printf("Failed to unmarshal participants: %v", err)
+			s.logger.Warn("Failed to unmarshal participants", "error", err)
 			participants = []string{}
 		}
 
