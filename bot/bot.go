@@ -24,22 +24,25 @@ const (
 	cmdDetract     = "detract"
 	cmdStatus      = "status"
 	cmdVacation    = "vacation"
+	cmdWfh         = "wfh"
 	argToday       = "today"
 	argTomorrow    = "tomorrow"
 	verbAddDisplay = " • Added"
 	verbSubDisplay = " • Subtracted"
 
 	helpMessage = "Available commands:\n" +
-		"• `(add|detract) <count> (today|tomorrow) <participants>` (e.g., `add 2 today @user1 @user2`)\n" +
+		"• `(add|detract) <count> [today|tomorrow|YYYY-MM-DD] <participants>` (e.g., `add 2 today @user1 @user2`)\n" +
 		"• `status [today|tomorrow|YYYY-MM-DD]` (e.g., `status tomorrow`)\n" +
-		"• `vacation <@user> YYYY-MM-DD YYYY-MM-DD` (e.g., `vacation @user1 2024-12-20 2024-12-25`) \n" +
+		"• `vacation <@user> YYYY-MM-DD YYYY-MM-DD` (e.g., `vacation @user1 2024-12-20 2024-12-25`)\n" +
+		"• `wfh [today|tomorrow|YYYY-MM-DD]` (e.g., `wfh tomorrow`) \n" +
 		"Source available at https://github.com/perbu/lunchbot"
 )
 
 // Pre-compiled regexes for command parsing
 var (
-	lunchCommandRegex    = regexp.MustCompile(`^(add|detract)\s+(\d+)\s+(today|tomorrow)\s+(.+)`)
+	lunchCommandRegex    = regexp.MustCompile(`^(add|detract)\s+(\d+)(?:\s+(today|tomorrow|\d{4}-\d{2}-\d{2}))?\s+(.+)`)
 	vacationCommandRegex = regexp.MustCompile(`^vacation\s+<@([^>]+)>\s+(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})`)
+	wfhCommandRegex      = regexp.MustCompile(`^wfh(?:\s+(today|tomorrow|\d{4}-\d{2}-\d{2}))?$`)
 )
 
 // CommandLogicInput holds the necessary details for processing a command's core logic.
@@ -79,7 +82,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Bot, error) {
 		client,
 		socketmode.OptionDebug(false), // Set to true for more verbose socket mode logging
 	)
-	store, err := storage.New(cfg.DBPath, logger)
+	store, err := storage.NewStorage(cfg.DBPath, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
@@ -111,12 +114,14 @@ func (b *Bot) registerCommands() {
 	b.appMentionCommandHandlers[cmdAdd] = (*Bot).handleLunchCommand          // Wrapper
 	b.appMentionCommandHandlers[cmdDetract] = (*Bot).handleLunchCommand      // Wrapper, uses the same logic
 	b.appMentionCommandHandlers[cmdVacation] = (*Bot).handleVacationCommand  // Wrapper
+	b.appMentionCommandHandlers[cmdWfh] = (*Bot).handleWfhCommand            // Wrapper
 
 	// Direct Message Commands
 	b.dmCommandHandlers[cmdStatus] = (*Bot).handleLunchStatusCommandDM // Wrapper
 	b.dmCommandHandlers[cmdAdd] = (*Bot).handleLunchCommandDM          // Wrapper
 	b.dmCommandHandlers[cmdDetract] = (*Bot).handleLunchCommandDM      // Wrapper
 	b.dmCommandHandlers[cmdVacation] = (*Bot).handleVacationCommandDM  // Wrapper
+	b.dmCommandHandlers[cmdWfh] = (*Bot).handleWfhCommandDM            // Wrapper
 }
 
 func (b *Bot) Close() error {
@@ -308,12 +313,12 @@ func (b *Bot) handleLunchCommandDM(event *slackevents.MessageEvent, text string)
 
 func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 	matches := lunchCommandRegex.FindStringSubmatch(input.Text)
-	// Expected: matches[0]=full, matches[1]=verb, matches[2]=count, matches[3]=when, matches[4]=participantsStr
+	// Expected: matches[0]=full, matches[1]=verb, matches[2]=count, matches[3]=when (optional), matches[4]=participantsStr
 
-	if len(matches) != 5 {
-		errorMsg := fmt.Sprintf("❌ Invalid format. Use: `@%s (add|detract) <count> (today|tomorrow) <participants>`", b.botUserID)
+	if len(matches) < 4 {
+		errorMsg := fmt.Sprintf("❌ Invalid format. Use: `@%s (add|detract) <count> [today|tomorrow|YYYY-MM-DD] <participants>`", b.botUserID)
 		if input.IsDM {
-			errorMsg = "❌ Invalid format. Use: `(add|detract) <count> (today|tomorrow) <participants>`"
+			errorMsg = "❌ Invalid format. Use: `(add|detract) <count> [today|tomorrow|YYYY-MM-DD] <participants>`"
 		}
 		b.sendMessage(input.ChannelID, errorMsg)
 		return
@@ -321,8 +326,13 @@ func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 
 	verb := matches[1] // "add" or "detract"
 	countStr := matches[2]
-	when := matches[3] // "today" or "tomorrow"
+	when := matches[3] // "today", "tomorrow", "YYYY-MM-DD", or empty
 	participantsStr := strings.TrimSpace(matches[4])
+
+	// Default to "today" if no date specified
+	if when == "" {
+		when = argToday
+	}
 
 	count, err := strconv.Atoi(countStr)
 	if err != nil {
@@ -343,10 +353,26 @@ func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 		return
 	}
 
-	targetDate := time.Now()
-	if when == argTomorrow {
-		targetDate = targetDate.AddDate(0, 0, 1)
+	var targetDate time.Time
+	var displayWhen string
+
+	if when == argToday {
+		targetDate = time.Now()
+		displayWhen = argToday
+	} else if when == argTomorrow {
+		targetDate = time.Now().AddDate(0, 0, 1)
+		displayWhen = argTomorrow
+	} else {
+		// Try to parse as YYYY-MM-DD
+		parsedTime, err := time.Parse(dateFormat, when)
+		if err != nil {
+			b.sendMessage(input.ChannelID, fmt.Sprintf("❌ Invalid date format '%s'. Use 'today', 'tomorrow', or YYYY-MM-DD.", when))
+			return
+		}
+		targetDate = parsedTime
+		displayWhen = when
 	}
+
 	dateStr := targetDate.Format(dateFormat)
 
 	err = b.storage.AddLunchRecord(dateStr, input.UserID, verb, count, participants)
@@ -377,12 +403,12 @@ func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 		// b.sendMessage(input.ChannelID, "⚠️ Warning: The new total is negative. Please check the records.")
 	}
 
-	confirmationMessage := fmt.Sprintf("Recorded %s %d for %s. Total for %s is now %d.", verb, count, when, dateStr, total)
+	confirmationMessage := fmt.Sprintf("Recorded %s %d for %s. Total for %s is now %d.", verb, count, displayWhen, dateStr, total)
 	if input.IsDM {
 		confirmationMessage = "✅ " + confirmationMessage
 		// Notify main channel if DM
 		channelNotification := fmt.Sprintf("📝 <@%s> used DM to %s %d lunches for %s (%s). New total for %s: %d",
-			input.UserID, verb, count, when, strings.Join(participants, ", "), dateStr, total)
+			input.UserID, verb, count, displayWhen, strings.Join(participants, ", "), dateStr, total)
 		b.sendMessage(b.config.Channel, channelNotification) // Ensure b.config.Channel is the correct main channel ID
 	}
 	b.sendMessage(input.ChannelID, confirmationMessage)
@@ -471,6 +497,95 @@ func (b *Bot) processVacationCommandLogic(input CommandLogicInput) {
 	b.sendMessage(input.ChannelID, confirmationMessage)
 }
 
+// --- WFH Command Logic ---
+
+func (b *Bot) handleWfhCommand(event *slackevents.AppMentionEvent, text string) {
+	input := CommandLogicInput{
+		UserID:         event.User, // User who is setting WFH
+		ChannelID:      event.Channel,
+		Text:           text, // e.g., "wfh tomorrow"
+		IsDM:           false,
+		RespondingUser: event.User,
+	}
+	b.logger.Info("Processing WFH command (mention)", "user", input.UserID, "text", input.Text)
+	b.processWfhCommandLogic(input)
+}
+
+func (b *Bot) handleWfhCommandDM(event *slackevents.MessageEvent, text string) {
+	input := CommandLogicInput{
+		UserID:         event.User,
+		ChannelID:      event.Channel,
+		Text:           text,
+		IsDM:           true,
+		RespondingUser: event.User,
+	}
+	b.logger.Info("Processing WFH command (DM)", "user", input.UserID, "text", input.Text)
+	b.processWfhCommandLogic(input)
+}
+
+func (b *Bot) processWfhCommandLogic(input CommandLogicInput) {
+	matches := wfhCommandRegex.FindStringSubmatch(input.Text)
+	// Expected: matches[0]=full, matches[1]=date (optional: today, tomorrow, or YYYY-MM-DD)
+
+	if len(matches) == 0 {
+		errorMsg := fmt.Sprintf("❌ Invalid format. Use: `@%s wfh [today|tomorrow|YYYY-MM-DD]`", b.botUserID)
+		if input.IsDM {
+			errorMsg = "❌ Invalid format. Use: `wfh [today|tomorrow|YYYY-MM-DD]`"
+		}
+		b.sendMessage(input.ChannelID, errorMsg)
+		return
+	}
+
+	when := matches[1] // Could be empty, "today", "tomorrow", or "YYYY-MM-DD"
+	if when == "" {
+		when = argToday // Default to today
+	}
+
+	var targetDate time.Time
+	var displayWhen string
+
+	if when == argToday {
+		targetDate = time.Now()
+		displayWhen = argToday
+	} else if when == argTomorrow {
+		targetDate = time.Now().AddDate(0, 0, 1)
+		displayWhen = argTomorrow
+	} else {
+		// Try to parse as YYYY-MM-DD
+		parsedTime, err := time.Parse(dateFormat, when)
+		if err != nil {
+			b.sendMessage(input.ChannelID, fmt.Sprintf("❌ Invalid date format '%s'. Use 'today', 'tomorrow', or YYYY-MM-DD.", when))
+			return
+		}
+		targetDate = parsedTime
+		displayWhen = when
+	}
+
+	dateStr := targetDate.Format(dateFormat)
+
+	err := b.storage.AddWfhRecord(input.UserID, dateStr)
+	if err != nil {
+		b.logger.Error("Failed to insert WFH record", "error", err, "user", input.UserID, "is_dm", input.IsDM)
+		b.sendMessage(input.ChannelID, "❌ Failed to record WFH status. Please try again.")
+		return
+	}
+
+	logAction := "recorded WFH"
+	if input.IsDM {
+		logAction = "recorded WFH via DM"
+	}
+	b.logger.Info(fmt.Sprintf("Successfully %s", logAction), "date", dateStr, "user", input.UserID)
+
+	confirmationMessage := fmt.Sprintf("✅ <@%s> set as working from home for %s (%s).", input.UserID, displayWhen, dateStr)
+	if input.IsDM {
+		// Notify main channel if DM
+		channelNotification := fmt.Sprintf("🏠 <@%s> used DM to set WFH status for %s (%s).",
+			input.UserID, displayWhen, dateStr)
+		b.sendMessage(b.config.Channel, channelNotification)
+	}
+	b.sendMessage(input.ChannelID, confirmationMessage)
+}
+
 // --- Lunch Status Command Logic ---
 
 func (b *Bot) handleLunchStatusCommand(event *slackevents.AppMentionEvent, text string) {
@@ -532,6 +647,13 @@ func (b *Bot) processLunchStatusCommandLogic(channelID, text string, isDM bool, 
 		return
 	}
 
+	wfhUserIDs, err := b.storage.GetWfhForDate(dateStr)
+	if err != nil {
+		b.logger.Error("Failed to get WFH users for status", "error", err, "date", dateStr, "user", requestingUser)
+		b.sendMessage(channelID, "Failed to retrieve WFH users.")
+		return
+	}
+
 	total, err := b.storage.CalculateTotal(dateStr, b.config.Baseline)
 	if err != nil {
 		b.logger.Error("Failed to calculate total for status", "error", err, "date", dateStr, "user", requestingUser)
@@ -539,9 +661,9 @@ func (b *Bot) processLunchStatusCommandLogic(channelID, text string, isDM bool, 
 		return
 	}
 
-	statusReport := b.buildStatusMessage(displayWhen, dateStr, records, vacationUserIDs, total)
+	statusReport := b.buildStatusMessage(displayWhen, dateStr, records, vacationUserIDs, wfhUserIDs, total)
 
-	logContext := []interface{}{"date", dateStr, "total", total, "baseline", b.config.Baseline, "changes", len(records), "vacations", len(vacationUserIDs), "user", requestingUser}
+	logContext := []interface{}{"date", dateStr, "total", total, "baseline", b.config.Baseline, "changes", len(records), "vacations", len(vacationUserIDs), "wfh", len(wfhUserIDs), "user", requestingUser}
 	if isDM {
 		b.logger.Info("Provided status via DM", logContext...)
 	} else {
@@ -551,7 +673,7 @@ func (b *Bot) processLunchStatusCommandLogic(channelID, text string, isDM bool, 
 }
 
 // buildStatusMessage formats the detailed status report.
-func (b *Bot) buildStatusMessage(when, dateStr string, records []storage.LunchRecord, vacationUserIDs []string, total int) string {
+func (b *Bot) buildStatusMessage(when, dateStr string, records []storage.LunchRecord, vacationUserIDs []string, wfhUserIDs []string, total int) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("📊 Lunch status for %s (%s):\n", when, dateStr))
 	sb.WriteString(fmt.Sprintf("• Baseline: %d\n", b.config.Baseline))
@@ -589,6 +711,26 @@ func (b *Bot) buildStatusMessage(when, dateStr string, records []storage.LunchRe
 		sb.WriteString(fmt.Sprintf("• On vacation (%d): %s\n", len(vacationUserIDs), strings.Join(vacationNames, ", ")))
 	} else {
 		sb.WriteString("• On vacation: None\n")
+	}
+
+	if len(wfhUserIDs) > 0 {
+		wfhNames := make([]string, len(wfhUserIDs))
+		for i, userID := range wfhUserIDs {
+			// Use real names instead of mentions as requested
+			slackUser, err := b.client.GetUserInfo(userID)
+			if err != nil {
+				b.logger.Warn("Failed to get user info for WFH status message", "user_id", userID, "error", err)
+				wfhNames[i] = fmt.Sprintf("<@%s>", userID) // Fallback to mention
+			} else {
+				wfhNames[i] = slackUser.RealName // Or slackUser.Name
+				if wfhNames[i] == "" {           // Fallback if RealName is empty
+					wfhNames[i] = slackUser.Name
+				}
+			}
+		}
+		sb.WriteString(fmt.Sprintf("• Working from home (%d): %s\n", len(wfhUserIDs), strings.Join(wfhNames, ", ")))
+	} else {
+		sb.WriteString("• Working from home: None\n")
 	}
 
 	sb.WriteString(fmt.Sprintf("• Total expected for lunch: %d", total))

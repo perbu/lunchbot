@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,9 @@ import (
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
+
+//go:embed migrations/*.sql
+var embedMigrations embed.FS
 
 type Storage struct {
 	db      *sql.DB
@@ -36,7 +40,7 @@ type VacationRecord struct {
 	CreatedAt string `json:"created_at"`
 }
 
-func New(dbPath string, logger *slog.Logger) (*Storage, error) {
+func NewStorage(dbPath string, logger *slog.Logger) (*Storage, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
@@ -47,11 +51,12 @@ func New(dbPath string, logger *slog.Logger) (*Storage, error) {
 		return nil, fmt.Errorf("failed to set dialect: %w", err)
 	}
 
+	goose.SetBaseFS(embedMigrations)
 	if err := goose.Up(db, "migrations"); err != nil {
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	queries := NewQueries(db)
+	queries := New(db)
 	storage := &Storage{
 		db:      db,
 		queries: queries,
@@ -135,6 +140,17 @@ func (s *Storage) GetVacationsForDate(date string) ([]string, error) {
 	})
 }
 
+func (s *Storage) AddWfhRecord(userID, date string) error {
+	return s.queries.AddWfhRecord(context.Background(), AddWfhRecordParams{
+		UserID: userID,
+		Date:   date,
+	})
+}
+
+func (s *Storage) GetWfhForDate(date string) ([]string, error) {
+	return s.queries.GetWfhForDate(context.Background(), date)
+}
+
 func (s *Storage) CalculateTotal(date string, baseline int) (int, error) {
 	total := baseline
 
@@ -159,6 +175,14 @@ func (s *Storage) CalculateTotal(date string, baseline int) (int, error) {
 	}
 
 	total -= vacationCount
+
+	// Subtract WFH
+	wfhUsers, err := s.GetWfhForDate(date)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get WFH users: %w", err)
+	}
+
+	total -= len(wfhUsers)
 
 	return total, nil
 }

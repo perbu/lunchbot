@@ -20,3 +20,12 @@ WHERE date_from <= ? AND date_to >= ?;
 SELECT user_id
 FROM vacations 
 WHERE date_from <= ? AND date_to >= ?;
+
+-- name: AddWfhRecord :exec
+INSERT INTO wfh (user_id, date) 
+VALUES (?, ?);
+
+-- name: GetWfhForDate :many
+SELECT user_id
+FROM wfh 
+WHERE date = ?;
