@@ -30,6 +30,9 @@ const (
 	verbAddDisplay = " • Added"
 	verbSubDisplay = " • Subtracted"
 
+	// helpMessage updated to ensure it reflects all commands and their general syntax.
+	// The syntax examples are kept general; specific error messages in handlers
+	// will include @BotName for non-DM contexts.
 	helpMessage = "Available commands:\n" +
 		"• `(add|detract) <count> [today|tomorrow|YYYY-MM-DD] <participants>` (e.g., `add 2 today @user1 @user2`)\n" +
 		"• `status [today|tomorrow|YYYY-MM-DD]` (e.g., `status tomorrow`)\n" +
@@ -43,6 +46,9 @@ var (
 	lunchCommandRegex    = regexp.MustCompile(`^(add|detract)\s+(\d+)(?:\s+(today|tomorrow|\d{4}-\d{2}-\d{2}))?\s+(.+)`)
 	vacationCommandRegex = regexp.MustCompile(`^vacation\s+<@([^>]+)>\s+(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})`)
 	wfhCommandRegex      = regexp.MustCompile(`^wfh(?:\s+(today|tomorrow|\d{4}-\d{2}-\d{2}))?$`)
+	// statusCommandRegex is added for parsing the status command.
+	// It captures the optional date argument (today, tomorrow, or YYYY-MM-DD).
+	statusCommandRegex = regexp.MustCompile(`^status(?:\s+(today|tomorrow|\d{4}-\d{2}-\d{2}))?$`)
 )
 
 // CommandLogicInput holds the necessary details for processing a command's core logic.
@@ -52,6 +58,7 @@ type CommandLogicInput struct {
 	Text           string // The command text itself (e.g., "add 2 today @user1")
 	IsDM           bool
 	RespondingUser string // User who initiated the command
+	BotUserID      string // Added to allow consistent error messages
 }
 
 // Bot structure remains largely the same
@@ -110,18 +117,18 @@ func New(cfg config.Config, logger *slog.Logger) (*Bot, error) {
 // registerCommands populates the command handlers for DMs and mentions.
 func (b *Bot) registerCommands() {
 	// App Mention Commands
-	b.appMentionCommandHandlers[cmdStatus] = (*Bot).handleLunchStatusCommand // Wrapper
-	b.appMentionCommandHandlers[cmdAdd] = (*Bot).handleLunchCommand          // Wrapper
-	b.appMentionCommandHandlers[cmdDetract] = (*Bot).handleLunchCommand      // Wrapper, uses the same logic
-	b.appMentionCommandHandlers[cmdVacation] = (*Bot).handleVacationCommand  // Wrapper
-	b.appMentionCommandHandlers[cmdWfh] = (*Bot).handleWfhCommand            // Wrapper
+	b.appMentionCommandHandlers[cmdStatus] = (*Bot).handleLunchStatusCommand
+	b.appMentionCommandHandlers[cmdAdd] = (*Bot).handleLunchCommand
+	b.appMentionCommandHandlers[cmdDetract] = (*Bot).handleLunchCommand
+	b.appMentionCommandHandlers[cmdVacation] = (*Bot).handleVacationCommand
+	b.appMentionCommandHandlers[cmdWfh] = (*Bot).handleWfhCommand
 
 	// Direct Message Commands
-	b.dmCommandHandlers[cmdStatus] = (*Bot).handleLunchStatusCommandDM // Wrapper
-	b.dmCommandHandlers[cmdAdd] = (*Bot).handleLunchCommandDM          // Wrapper
-	b.dmCommandHandlers[cmdDetract] = (*Bot).handleLunchCommandDM      // Wrapper
-	b.dmCommandHandlers[cmdVacation] = (*Bot).handleVacationCommandDM  // Wrapper
-	b.dmCommandHandlers[cmdWfh] = (*Bot).handleWfhCommandDM            // Wrapper
+	b.dmCommandHandlers[cmdStatus] = (*Bot).handleLunchStatusCommandDM
+	b.dmCommandHandlers[cmdAdd] = (*Bot).handleLunchCommandDM
+	b.dmCommandHandlers[cmdDetract] = (*Bot).handleLunchCommandDM
+	b.dmCommandHandlers[cmdVacation] = (*Bot).handleVacationCommandDM
+	b.dmCommandHandlers[cmdWfh] = (*Bot).handleWfhCommandDM
 }
 
 func (b *Bot) Close() error {
@@ -157,23 +164,19 @@ func (b *Bot) Start(ctx context.Context) error {
 
 	err := b.socketClient.RunContext(ctx)
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		// context.Canceled or DeadlineExceeded are expected on shutdown
 		return fmt.Errorf("socketClient.RunContext failed: %w", err)
 	}
 	return nil
 }
 
 func (b *Bot) StartScheduler(ctx context.Context) {
-	location, err := time.LoadLocation("Europe/Oslo") // Make timezone configurable if needed
+	location, err := time.LoadLocation("Europe/Oslo")
 	if err != nil {
 		b.logger.Error("Failed to load timezone 'Europe/Oslo', using UTC", "error", err)
 		location = time.UTC
 	}
-
-	// Use a ticker that aligns better or calculate duration till next event
-	// For simplicity, 1-minute ticker is kept, but be aware of potential drift.
 	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop() // Ensure ticker is stopped when function exits
+	defer ticker.Stop()
 
 	b.logger.Info("Scheduler started", "timezone", location.String())
 
@@ -184,12 +187,10 @@ func (b *Bot) StartScheduler(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := time.Now().In(location)
-			// Check for daily report at 10:00
 			if now.Hour() == 10 && now.Minute() == 0 {
 				b.logger.Info("Scheduler: Time for daily report", "time", now)
 				b.sendDailyReport()
 			}
-			// Check for warning at 9:50
 			if now.Hour() == 9 && now.Minute() == 50 {
 				b.logger.Info("Scheduler: Time for warning", "time", now)
 				b.sendWarning()
@@ -209,42 +210,43 @@ func (b *Bot) handleEvent(event slackevents.EventsAPIEvent) {
 			b.logger.Debug("Processing app mention event", "user", ev.User, "channel", ev.Channel)
 			b.handleMention(ev)
 		case *slackevents.MessageEvent:
-			// Handle DMs (im) and Group DMs (mpim)
 			if ev.ChannelType == "im" || ev.ChannelType == "mpim" {
 				b.logger.Debug("Processing message event (DM/MPIM)", "user", ev.User, "channel", ev.Channel)
 				b.handleDirectMessage(ev)
 			} else {
 				b.logger.Debug("Ignoring non-DM/MPIM message event", "channel_type", ev.ChannelType, "user", ev.User)
 			}
+		case *slackevents.AppHomeOpenedEvent:
+			b.logger.Debug("Processing App Home opened event", "user", ev.User, "tab", ev.Tab, "view_id", ev.View) // Added more event details to log
+			// Call the new handler function
+			b.handleAppHomeOpened(ev)
 		default:
 			b.logger.Debug("Unhandled inner event type", "type", fmt.Sprintf("%T", ev))
 		}
 	default:
 		b.logger.Debug("Unhandled outer event type", "type", event.Type)
-
 	}
 }
 
-// handleDirectMessage dispatches DM commands using the command registry.
 func (b *Bot) handleDirectMessage(event *slackevents.MessageEvent) {
-	if event.User == b.botUserID || event.User == "" { // Also check for empty User, sometimes happens for bot messages
+	if event.User == b.botUserID || event.User == "" {
 		b.logger.Debug("Skipping DM from self or empty user", "user", event.User)
 		return
 	}
-	if event.SubType != "" && event.SubType != "file_share" { // Allow file_share if text might accompany it
+	if event.SubType != "" && event.SubType != "file_share" {
 		b.logger.Debug("Skipping DM with subtype", "subtype", event.SubType)
 		return
 	}
 
 	text := strings.TrimSpace(event.Text)
-	if text == "" { // Ignore empty messages
+	if text == "" {
 		return
 	}
 	b.logger.Info("Received DM", "user", event.User, "text", text)
 
 	for prefix, handler := range b.dmCommandHandlers {
 		if strings.HasPrefix(text, prefix) {
-			handler(b, event, text) // Pass the full text; handler will parse its own arguments
+			handler(b, event, text)
 			return
 		}
 	}
@@ -253,19 +255,12 @@ func (b *Bot) handleDirectMessage(event *slackevents.MessageEvent) {
 	b.sendHelpMessage(event.Channel)
 }
 
-// handleMention dispatches mention commands using the command registry.
 func (b *Bot) handleMention(event *slackevents.AppMentionEvent) {
-	// Optional: Allow mentions only in the configured channel, or make it configurable
-	// if event.Channel != b.config.Channel {
-	// 	b.logger.Debug("Mention in wrong channel, ignoring", "event_channel", event.Channel, "config_channel", b.config.Channel)
-	// 	return
-	// }
-
 	text := strings.TrimSpace(event.Text)
 	botMention := fmt.Sprintf("<@%s>", b.botUserID)
 	processedText := strings.TrimSpace(strings.TrimPrefix(text, botMention))
 
-	if processedText == "" { // Bot was mentioned with no command
+	if processedText == "" {
 		b.sendHelpMessage(event.Channel)
 		return
 	}
@@ -274,8 +269,6 @@ func (b *Bot) handleMention(event *slackevents.AppMentionEvent) {
 
 	for prefix, handler := range b.appMentionCommandHandlers {
 		if strings.HasPrefix(processedText, prefix) {
-			// Pass the text *after* removing the bot mention.
-			// The handlers expect text like "add 2 today @user1"
 			handler(b, event, processedText)
 			return
 		}
@@ -289,11 +282,12 @@ func (b *Bot) handleMention(event *slackevents.AppMentionEvent) {
 
 func (b *Bot) handleLunchCommand(event *slackevents.AppMentionEvent, text string) {
 	input := CommandLogicInput{
-		UserID:         event.User, // The user who typed the command
+		UserID:         event.User,
 		ChannelID:      event.Channel,
-		Text:           text, // e.g., "add 2 today @user1 @user2"
+		Text:           text,
 		IsDM:           false,
 		RespondingUser: event.User,
+		BotUserID:      b.botUserID, // Pass BotUserID for consistent error messages
 	}
 	b.logger.Info("Processing lunch command (mention)", "user", input.UserID, "text", input.Text)
 	b.processLunchCommandLogic(input)
@@ -306,6 +300,7 @@ func (b *Bot) handleLunchCommandDM(event *slackevents.MessageEvent, text string)
 		Text:           text,
 		IsDM:           true,
 		RespondingUser: event.User,
+		BotUserID:      b.botUserID, // Pass BotUserID
 	}
 	b.logger.Info("Processing lunch command (DM)", "user", input.UserID, "text", input.Text)
 	b.processLunchCommandLogic(input)
@@ -315,21 +310,23 @@ func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 	matches := lunchCommandRegex.FindStringSubmatch(input.Text)
 	// Expected: matches[0]=full, matches[1]=verb, matches[2]=count, matches[3]=when (optional), matches[4]=participantsStr
 
-	if len(matches) < 4 {
-		errorMsg := fmt.Sprintf("❌ Invalid format. Use: `@%s (add|detract) <count> [today|tomorrow|YYYY-MM-DD] <participants>`", b.botUserID)
+	// Standardized check for regex match failure
+	if matches == nil {
+		var errorMsg string
 		if input.IsDM {
 			errorMsg = "❌ Invalid format. Use: `(add|detract) <count> [today|tomorrow|YYYY-MM-DD] <participants>`"
+		} else {
+			errorMsg = fmt.Sprintf("❌ Invalid format. Use: `@%s (add|detract) <count> [today|tomorrow|YYYY-MM-DD] <participants>`", input.BotUserID)
 		}
 		b.sendMessage(input.ChannelID, errorMsg)
 		return
 	}
 
-	verb := matches[1] // "add" or "detract"
+	verb := matches[1]
 	countStr := matches[2]
-	when := matches[3] // "today", "tomorrow", "YYYY-MM-DD", or empty
+	when := matches[3] // This will be an empty string if the optional date part is not provided
 	participantsStr := strings.TrimSpace(matches[4])
 
-	// Default to "today" if no date specified
 	if when == "" {
 		when = argToday
 	}
@@ -346,8 +343,6 @@ func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 	}
 
 	participants := strings.Fields(participantsStr)
-	// Validate participants (e.g., ensure they are valid user mentions if necessary)
-	// For now, just check count.
 	if len(participants) != count {
 		b.sendMessage(input.ChannelID, fmt.Sprintf("❌ Number of participants mentioned (%d) doesn't match count (%d).", len(participants), count))
 		return
@@ -363,7 +358,6 @@ func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 		targetDate = time.Now().AddDate(0, 0, 1)
 		displayWhen = argTomorrow
 	} else {
-		// Try to parse as YYYY-MM-DD
 		parsedTime, err := time.Parse(dateFormat, when)
 		if err != nil {
 			b.sendMessage(input.ChannelID, fmt.Sprintf("❌ Invalid date format '%s'. Use 'today', 'tomorrow', or YYYY-MM-DD.", when))
@@ -391,25 +385,18 @@ func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 	total, err := b.storage.CalculateTotal(dateStr, b.config.Baseline)
 	if err != nil {
 		b.logger.Error("Failed to calculate total after lunch record", "error", err, "date", dateStr)
-		// Non-critical for the user's confirmation, but should be logged.
-		// Decide if user should be notified. For now, let's not send another error message if record was saved.
 	}
 
-	// The check for total < 0 should ideally be part of the transaction in storage or handled more robustly.
-	// If AddLunchRecord could make it negative, it should perhaps error or be handled before this point.
-	// For now, we'll proceed with the message based on the potentially calculated total.
-	if total < 0 && err == nil { // Only warn if CalculateTotal didn't error but result is negative
+	if total < 0 && err == nil {
 		b.logger.Warn("Total calculated is negative, this might indicate an issue.", "total", total, "date", dateStr)
-		// b.sendMessage(input.ChannelID, "⚠️ Warning: The new total is negative. Please check the records.")
 	}
 
 	confirmationMessage := fmt.Sprintf("Recorded %s %d for %s. Total for %s is now %d.", verb, count, displayWhen, dateStr, total)
 	if input.IsDM {
 		confirmationMessage = "✅ " + confirmationMessage
-		// Notify main channel if DM
 		channelNotification := fmt.Sprintf("📝 <@%s> used DM to %s %d lunches for %s (%s). New total for %s: %d",
 			input.UserID, verb, count, displayWhen, strings.Join(participants, ", "), dateStr, total)
-		b.sendMessage(b.config.Channel, channelNotification) // Ensure b.config.Channel is the correct main channel ID
+		b.sendMessage(b.config.Channel, channelNotification)
 	}
 	b.sendMessage(input.ChannelID, confirmationMessage)
 }
@@ -418,11 +405,12 @@ func (b *Bot) processLunchCommandLogic(input CommandLogicInput) {
 
 func (b *Bot) handleVacationCommand(event *slackevents.AppMentionEvent, text string) {
 	input := CommandLogicInput{
-		UserID:         event.User, // User who is performing the action
+		UserID:         event.User,
 		ChannelID:      event.Channel,
-		Text:           text, // e.g., "vacation @targetUser 2024-12-20 2024-12-25"
+		Text:           text,
 		IsDM:           false,
 		RespondingUser: event.User,
+		BotUserID:      b.botUserID, // Pass BotUserID
 	}
 	b.logger.Info("Processing vacation command (mention)", "user", input.UserID, "text", input.Text)
 	b.processVacationCommandLogic(input)
@@ -435,6 +423,7 @@ func (b *Bot) handleVacationCommandDM(event *slackevents.MessageEvent, text stri
 		Text:           text,
 		IsDM:           true,
 		RespondingUser: event.User,
+		BotUserID:      b.botUserID, // Pass BotUserID
 	}
 	b.logger.Info("Processing vacation command (DM)", "user", input.UserID, "text", input.Text)
 	b.processVacationCommandLogic(input)
@@ -444,20 +433,24 @@ func (b *Bot) processVacationCommandLogic(input CommandLogicInput) {
 	matches := vacationCommandRegex.FindStringSubmatch(input.Text)
 	// Expected: matches[0]=full, matches[1]=targetUserID, matches[2]=fromDate, matches[3]=toDate
 
-	if len(matches) != 4 {
-		errorMsg := fmt.Sprintf("Invalid format. Use: `@%s vacation <@user> YYYY-MM-DD YYYY-MM-DD`", b.botUserID)
+	// Standardized check for regex match failure.
+	// For this regex, a match always yields 4 elements (full + 3 groups).
+	// So, `matches == nil` is the primary check.
+	if matches == nil {
+		var errorMsg string
 		if input.IsDM {
 			errorMsg = "Invalid format. Use: `vacation <@user> YYYY-MM-DD YYYY-MM-DD`"
+		} else {
+			errorMsg = fmt.Sprintf("Invalid format. Use: `@%s vacation <@user> YYYY-MM-DD YYYY-MM-DD`", input.BotUserID)
 		}
 		b.sendMessage(input.ChannelID, errorMsg)
 		return
 	}
 
-	targetUserID := matches[1] // The user going on vacation
+	targetUserID := matches[1]
 	fromDateStr := matches[2]
 	toDateStr := matches[3]
 
-	// Validate dates (storage.ValidateDate might not be needed if time.Parse is strict enough)
 	fromTime, errFrom := time.Parse(dateFormat, fromDateStr)
 	if errFrom != nil {
 		b.sendMessage(input.ChannelID, fmt.Sprintf("Invalid 'from' date format: %s. Use YYYY-MM-DD.", fromDateStr))
@@ -489,7 +482,6 @@ func (b *Bot) processVacationCommandLogic(input CommandLogicInput) {
 	confirmationMessage := fmt.Sprintf("Recorded vacation for <@%s> from %s to %s.", targetUserID, fromDateStr, toDateStr)
 	if input.IsDM {
 		confirmationMessage = "✅ " + confirmationMessage
-		// Notify main channel if DM
 		channelNotification := fmt.Sprintf("🏖️ <@%s> used DM to record vacation for <@%s> from %s to %s.",
 			input.RespondingUser, targetUserID, fromDateStr, toDateStr)
 		b.sendMessage(b.config.Channel, channelNotification)
@@ -501,11 +493,12 @@ func (b *Bot) processVacationCommandLogic(input CommandLogicInput) {
 
 func (b *Bot) handleWfhCommand(event *slackevents.AppMentionEvent, text string) {
 	input := CommandLogicInput{
-		UserID:         event.User, // User who is setting WFH
+		UserID:         event.User,
 		ChannelID:      event.Channel,
-		Text:           text, // e.g., "wfh tomorrow"
+		Text:           text,
 		IsDM:           false,
 		RespondingUser: event.User,
+		BotUserID:      b.botUserID, // Pass BotUserID
 	}
 	b.logger.Info("Processing WFH command (mention)", "user", input.UserID, "text", input.Text)
 	b.processWfhCommandLogic(input)
@@ -518,6 +511,7 @@ func (b *Bot) handleWfhCommandDM(event *slackevents.MessageEvent, text string) {
 		Text:           text,
 		IsDM:           true,
 		RespondingUser: event.User,
+		BotUserID:      b.botUserID, // Pass BotUserID
 	}
 	b.logger.Info("Processing WFH command (DM)", "user", input.UserID, "text", input.Text)
 	b.processWfhCommandLogic(input)
@@ -527,18 +521,21 @@ func (b *Bot) processWfhCommandLogic(input CommandLogicInput) {
 	matches := wfhCommandRegex.FindStringSubmatch(input.Text)
 	// Expected: matches[0]=full, matches[1]=date (optional: today, tomorrow, or YYYY-MM-DD)
 
-	if len(matches) == 0 {
-		errorMsg := fmt.Sprintf("❌ Invalid format. Use: `@%s wfh [today|tomorrow|YYYY-MM-DD]`", b.botUserID)
+	// Standardized check for regex match failure
+	if matches == nil {
+		var errorMsg string
 		if input.IsDM {
 			errorMsg = "❌ Invalid format. Use: `wfh [today|tomorrow|YYYY-MM-DD]`"
+		} else {
+			errorMsg = fmt.Sprintf("❌ Invalid format. Use: `@%s wfh [today|tomorrow|YYYY-MM-DD]`", input.BotUserID)
 		}
 		b.sendMessage(input.ChannelID, errorMsg)
 		return
 	}
 
-	when := matches[1] // Could be empty, "today", "tomorrow", or "YYYY-MM-DD"
+	when := matches[1] // This will be empty if date part is not provided
 	if when == "" {
-		when = argToday // Default to today
+		when = argToday
 	}
 
 	var targetDate time.Time
@@ -551,7 +548,6 @@ func (b *Bot) processWfhCommandLogic(input CommandLogicInput) {
 		targetDate = time.Now().AddDate(0, 0, 1)
 		displayWhen = argTomorrow
 	} else {
-		// Try to parse as YYYY-MM-DD
 		parsedTime, err := time.Parse(dateFormat, when)
 		if err != nil {
 			b.sendMessage(input.ChannelID, fmt.Sprintf("❌ Invalid date format '%s'. Use 'today', 'tomorrow', or YYYY-MM-DD.", when))
@@ -578,7 +574,6 @@ func (b *Bot) processWfhCommandLogic(input CommandLogicInput) {
 
 	confirmationMessage := fmt.Sprintf("✅ <@%s> set as working from home for %s (%s).", input.UserID, displayWhen, dateStr)
 	if input.IsDM {
-		// Notify main channel if DM
 		channelNotification := fmt.Sprintf("🏠 <@%s> used DM to set WFH status for %s (%s).",
 			input.UserID, displayWhen, dateStr)
 		b.sendMessage(b.config.Channel, channelNotification)
@@ -590,48 +585,60 @@ func (b *Bot) processWfhCommandLogic(input CommandLogicInput) {
 
 func (b *Bot) handleLunchStatusCommand(event *slackevents.AppMentionEvent, text string) {
 	b.logger.Info("Processing status command (mention)", "user", event.User, "text", text)
-	b.processLunchStatusCommandLogic(event.Channel, text, false, event.User)
+	// Pass b.botUserID for consistent error message formatting
+	b.processLunchStatusCommandLogic(event.Channel, text, false, event.User, b.botUserID)
 }
 
 func (b *Bot) handleLunchStatusCommandDM(event *slackevents.MessageEvent, text string) {
 	b.logger.Info("Processing status command (DM)", "user", event.User, "text", text)
-	b.processLunchStatusCommandLogic(event.Channel, text, true, event.User)
+	// Pass b.botUserID (though not used in DM error message, good for signature consistency)
+	b.processLunchStatusCommandLogic(event.Channel, text, true, event.User, b.botUserID)
 }
 
-// Helper to parse date input for status commands
-func (b *Bot) parseDateInputForStatus(textParts []string, channelIDForErrorMsg string) (targetTime time.Time, displayWhen string, parsedDateStr string, ok bool) {
-	displayWhen = argToday  // Default
-	targetTime = time.Now() // Default
+// processLunchStatusCommandLogic now uses regex for parsing and has botUserID for error messages.
+// The helper parseDateInputForStatus is removed.
+func (b *Bot) processLunchStatusCommandLogic(channelID, text string, isDM bool, requestingUser string, botUserID string) {
+	matches := statusCommandRegex.FindStringSubmatch(text)
+	// Expected: matches[0]=full, matches[1]=date (optional: today, tomorrow, or YYYY-MM-DD)
 
-	if len(textParts) >= 2 { // e.g. "status tomorrow" or "status 2024-01-15"
-		dateInput := textParts[1]
-		if dateInput == argToday {
-			// Defaults are fine
-		} else if dateInput == argTomorrow {
-			displayWhen = argTomorrow
-			targetTime = time.Now().AddDate(0, 0, 1)
+	if matches == nil {
+		var errorMsg string
+		if isDM {
+			errorMsg = "❌ Invalid format. Use: `status [today|tomorrow|YYYY-MM-DD]`"
 		} else {
-			// Try to parse as YYYY-MM-DD
-			parsedT, err := time.Parse(dateFormat, dateInput)
-			if err != nil {
-				b.sendMessage(channelIDForErrorMsg, fmt.Sprintf("Invalid date format '%s'. Use 'today', 'tomorrow', or YYYY-MM-DD.", dateInput))
-				return time.Time{}, "", "", false // Not OK
-			}
-			targetTime = parsedT
-			displayWhen = dateInput // Use the actual date string for "when"
+			errorMsg = fmt.Sprintf("❌ Invalid format. Use: `@%s status [today|tomorrow|YYYY-MM-DD]`", botUserID)
 		}
+		b.sendMessage(channelID, errorMsg)
+		return
 	}
-	parsedDateStr = targetTime.Format(dateFormat)
-	return targetTime, displayWhen, parsedDateStr, true // OK
-}
 
-func (b *Bot) processLunchStatusCommandLogic(channelID, text string, isDM bool, requestingUser string) {
-	parts := strings.Fields(text) // parts[0] is "status"
-
-	_, displayWhen, dateStr, ok := b.parseDateInputForStatus(parts, channelID)
-	if !ok {
-		return // Error message already sent by parser
+	whenArg := argToday                       // Default to today
+	if len(matches) > 1 && matches[1] != "" { // matches[1] contains the date argument if provided
+		whenArg = matches[1]
 	}
+
+	var targetTime time.Time
+	var displayWhen string
+
+	if whenArg == argToday {
+		targetTime = time.Now()
+		displayWhen = argToday
+	} else if whenArg == argTomorrow {
+		targetTime = time.Now().AddDate(0, 0, 1)
+		displayWhen = argTomorrow
+	} else { // Must be YYYY-MM-DD due to regex
+		parsedT, err := time.Parse(dateFormat, whenArg)
+		if err != nil {
+			// This should ideally not happen if regex is correct and captures a valid format string.
+			// However, time.Parse can still fail for invalid dates like "2023-02-30".
+			b.logger.Error("Date matched regex but failed to parse", "date_arg", whenArg, "error", err, "user", requestingUser)
+			b.sendMessage(channelID, fmt.Sprintf("❌ Invalid date value '%s'. Please use a correct YYYY-MM-DD date.", whenArg))
+			return
+		}
+		targetTime = parsedT
+		displayWhen = whenArg
+	}
+	dateStr := targetTime.Format(dateFormat)
 
 	records, err := b.storage.GetLunchRecordsForDate(dateStr)
 	if err != nil {
@@ -682,11 +689,10 @@ func (b *Bot) buildStatusMessage(when, dateStr string, records []storage.LunchRe
 		sb.WriteString("• Changes:\n")
 		for _, record := range records {
 			participantsList := strings.Join(record.Participants, ", ")
-			verbDisplay := verbSubDisplay // Default to subtracted
+			verbDisplay := verbSubDisplay
 			if record.Verb == cmdAdd {
 				verbDisplay = verbAddDisplay
 			}
-			// Clarify who made the change
 			sb.WriteString(fmt.Sprintf("  -%s %d by <@%s> (participants: %s)\n", verbDisplay, record.Count, record.UserID, participantsList))
 		}
 	} else {
@@ -696,14 +702,13 @@ func (b *Bot) buildStatusMessage(when, dateStr string, records []storage.LunchRe
 	if len(vacationUserIDs) > 0 {
 		vacationNames := make([]string, len(vacationUserIDs))
 		for i, userID := range vacationUserIDs {
-			// Fetching user info can be slow; consider caching or if just userID is acceptable.
 			slackUser, err := b.client.GetUserInfo(userID)
 			if err != nil {
 				b.logger.Warn("Failed to get user info for status message", "user_id", userID, "error", err)
-				vacationNames[i] = fmt.Sprintf("<@%s>", userID) // Fallback to mention
+				vacationNames[i] = fmt.Sprintf("<@%s>", userID)
 			} else {
-				vacationNames[i] = slackUser.RealName // Or slackUser.Name
-				if vacationNames[i] == "" {           // Fallback if RealName is empty
+				vacationNames[i] = slackUser.RealName
+				if vacationNames[i] == "" {
 					vacationNames[i] = slackUser.Name
 				}
 			}
@@ -716,14 +721,13 @@ func (b *Bot) buildStatusMessage(when, dateStr string, records []storage.LunchRe
 	if len(wfhUserIDs) > 0 {
 		wfhNames := make([]string, len(wfhUserIDs))
 		for i, userID := range wfhUserIDs {
-			// Use real names instead of mentions as requested
 			slackUser, err := b.client.GetUserInfo(userID)
 			if err != nil {
 				b.logger.Warn("Failed to get user info for WFH status message", "user_id", userID, "error", err)
-				wfhNames[i] = fmt.Sprintf("<@%s>", userID) // Fallback to mention
+				wfhNames[i] = fmt.Sprintf("<@%s>", userID)
 			} else {
-				wfhNames[i] = slackUser.RealName // Or slackUser.Name
-				if wfhNames[i] == "" {           // Fallback if RealName is empty
+				wfhNames[i] = slackUser.RealName
+				if wfhNames[i] == "" {
 					wfhNames[i] = slackUser.Name
 				}
 			}
@@ -744,20 +748,18 @@ func (b *Bot) sendMessage(channel, text string) {
 		b.logger.Error("sendMessage called with empty channel ID", "text", text)
 		return
 	}
-	_, _, err := b.client.PostMessage(channel, slack.MsgOptionText(text, false), slack.MsgOptionAsUser(false)) // AsUser(false) is typical for bots
+	_, _, err := b.client.PostMessage(channel, slack.MsgOptionText(text, false), slack.MsgOptionAsUser(false))
 	if err != nil {
 		b.logger.Error("Failed to send message", "channel", channel, "error", err, "text", text)
 	}
 }
 
 func (b *Bot) sendHelpMessage(channelID string) {
-	// Add bot user ID to example commands if help is for a mention context (optional)
-	// For simplicity, using a generic help message here.
 	b.sendMessage(channelID, helpMessage)
 }
 
 func (b *Bot) sendDailyReport() {
-	location, _ := time.LoadLocation("Europe/Oslo") // Or get from config/scheduler
+	location, _ := time.LoadLocation("Europe/Oslo")
 	if location == nil {
 		location = time.UTC
 	}
@@ -766,14 +768,13 @@ func (b *Bot) sendDailyReport() {
 	total, err := b.storage.CalculateTotal(todayInLocation, b.config.Baseline)
 	if err != nil {
 		b.logger.Error("Failed to calculate total for daily report", "error", err, "date", todayInLocation)
-		// Optionally send an error report to an admin channel
 		b.sendMessage(b.config.ReportUser, fmt.Sprintf("Error generating daily lunch report for %s: %v", todayInLocation, err))
 		return
 	}
 
 	b.logger.Info("Sending daily report", "date", todayInLocation, "total", total, "report_user", b.config.ReportUser)
 	message := fmt.Sprintf("🗓️ Daily lunch report for %s: %d people expected.", todayInLocation, total)
-	b.sendMessage(b.config.ReportUser, message) // ReportUser should be a channel ID or user ID
+	b.sendMessage(b.config.ReportUser, message)
 }
 
 func (b *Bot) sendWarning() {
@@ -783,4 +784,10 @@ func (b *Bot) sendWarning() {
 	}
 	b.logger.Info("Sending lunch order warning", "channel", b.config.Channel)
 	b.sendMessage(b.config.Channel, "⚠️ Reminder: Lunch order closes in 10 minutes!")
+}
+
+// handleAppHomeOpened constructs and publishes the App Home view.
+func (b *Bot) handleAppHomeOpened(event *slackevents.AppHomeOpenedEvent) {
+	b.logger.Info("App Home opened by user - this is not supported", "user", event.User)
+
 }
