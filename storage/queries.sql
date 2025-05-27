@@ -29,3 +29,12 @@ VALUES (?, ?);
 SELECT user_id
 FROM wfh 
 WHERE date = ?;
+
+-- name: AddClosedDay :exec
+INSERT INTO closed_days (date, reason) 
+VALUES (?, ?);
+
+-- name: IsDateClosed :one
+SELECT COUNT(*) as count
+FROM closed_days 
+WHERE date = ?;

@@ -8,6 +8,13 @@ import (
 	"database/sql"
 )
 
+type ClosedDay struct {
+	ID        int64
+	Date      string
+	Reason    sql.NullString
+	CreatedAt sql.NullTime
+}
+
 type Lunch struct {
 	ID           int64
 	Date         string

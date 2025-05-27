@@ -7,7 +7,23 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 )
+
+const addClosedDay = `-- name: AddClosedDay :exec
+INSERT INTO closed_days (date, reason) 
+VALUES (?, ?)
+`
+
+type AddClosedDayParams struct {
+	Date   string
+	Reason sql.NullString
+}
+
+func (q *Queries) AddClosedDay(ctx context.Context, arg AddClosedDayParams) error {
+	_, err := q.db.ExecContext(ctx, addClosedDay, arg.Date, arg.Reason)
+	return err
+}
 
 const addLunchRecord = `-- name: AddLunchRecord :exec
 INSERT INTO lunches (date, user_id, verb, count, participants) 
@@ -180,4 +196,17 @@ func (q *Queries) GetWfhForDate(ctx context.Context, date string) ([]string, err
 		return nil, err
 	}
 	return items, nil
+}
+
+const isDateClosed = `-- name: IsDateClosed :one
+SELECT COUNT(*) as count
+FROM closed_days 
+WHERE date = ?
+`
+
+func (q *Queries) IsDateClosed(ctx context.Context, date string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, isDateClosed, date)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }

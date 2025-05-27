@@ -24,7 +24,9 @@ const (
 	cmdDetract     = "detract"
 	cmdStatus      = "status"
 	cmdVacation    = "vacation"
+	cmdOoo         = "ooo"
 	cmdWfh         = "wfh"
+	cmdClosed      = "closed"
 	argToday       = "today"
 	argTomorrow    = "tomorrow"
 	verbAddDisplay = " • Added"
@@ -37,7 +39,10 @@ const (
 		"• `(add|detract) <count> [today|tomorrow|YYYY-MM-DD] <participants>` (e.g., `add 2 today @user1 @user2`)\n" +
 		"• `status [today|tomorrow|YYYY-MM-DD]` (e.g., `status tomorrow`)\n" +
 		"• `vacation <@user> YYYY-MM-DD YYYY-MM-DD` (e.g., `vacation @user1 2024-12-20 2024-12-25`)\n" +
-		"• `wfh [today|tomorrow|YYYY-MM-DD]` (e.g., `wfh tomorrow`) \n" +
+		"• `ooo <@user> YYYY-MM-DD [YYYY-MM-DD]` (e.g., `ooo @user1 2024-12-20` or `ooo @user1 2024-12-20 2024-12-25`)\n" +
+		"• `wfh [today|tomorrow|YYYY-MM-DD]` (e.g., `wfh tomorrow`)\n" +
+		"• `closed (today|tomorrow|YYYY-MM-DD) [reason]` (e.g., `closed tomorrow holiday`)\n" +
+		"Note: Saturdays and Sundays are automatically closed days.\n" +
 		"Source available at https://github.com/perbu/lunchbot"
 )
 
@@ -45,10 +50,12 @@ const (
 var (
 	lunchCommandRegex    = regexp.MustCompile(`^(add|detract)\s+(\d+)(?:\s+(today|tomorrow|\d{4}-\d{2}-\d{2}))?\s+(.+)`)
 	vacationCommandRegex = regexp.MustCompile(`^vacation\s+<@([^>]+)>\s+(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})`)
+	oooCommandRegex      = regexp.MustCompile(`^ooo\s+<@([^>]+)>\s+(\d{4}-\d{2}-\d{2})(?:\s+(\d{4}-\d{2}-\d{2}))?`)
 	wfhCommandRegex      = regexp.MustCompile(`^wfh(?:\s+(today|tomorrow|\d{4}-\d{2}-\d{2}))?$`)
 	// statusCommandRegex is added for parsing the status command.
 	// It captures the optional date argument (today, tomorrow, or YYYY-MM-DD).
 	statusCommandRegex = regexp.MustCompile(`^status(?:\s+(today|tomorrow|\d{4}-\d{2}-\d{2}))?$`)
+	closedCommandRegex = regexp.MustCompile(`^closed\s+(today|tomorrow|\d{4}-\d{2}-\d{2})(?:\s+(.+))?$`)
 )
 
 // CommandLogicInput holds the necessary details for processing a command's core logic.
@@ -121,14 +128,18 @@ func (b *Bot) registerCommands() {
 	b.appMentionCommandHandlers[cmdAdd] = (*Bot).handleLunchCommand
 	b.appMentionCommandHandlers[cmdDetract] = (*Bot).handleLunchCommand
 	b.appMentionCommandHandlers[cmdVacation] = (*Bot).handleVacationCommand
+	b.appMentionCommandHandlers[cmdOoo] = (*Bot).handleOooCommand
 	b.appMentionCommandHandlers[cmdWfh] = (*Bot).handleWfhCommand
+	b.appMentionCommandHandlers[cmdClosed] = (*Bot).handleClosedCommand
 
 	// Direct Message Commands
 	b.dmCommandHandlers[cmdStatus] = (*Bot).handleLunchStatusCommandDM
 	b.dmCommandHandlers[cmdAdd] = (*Bot).handleLunchCommandDM
 	b.dmCommandHandlers[cmdDetract] = (*Bot).handleLunchCommandDM
 	b.dmCommandHandlers[cmdVacation] = (*Bot).handleVacationCommandDM
+	b.dmCommandHandlers[cmdOoo] = (*Bot).handleOooCommandDM
 	b.dmCommandHandlers[cmdWfh] = (*Bot).handleWfhCommandDM
+	b.dmCommandHandlers[cmdClosed] = (*Bot).handleClosedCommandDM
 }
 
 func (b *Bot) Close() error {
@@ -244,8 +255,11 @@ func (b *Bot) handleDirectMessage(event *slackevents.MessageEvent) {
 	}
 	b.logger.Info("Received DM", "user", event.User, "text", text)
 
+	// Convert to lowercase for case-insensitive command matching
+	textLower := strings.ToLower(text)
+
 	for prefix, handler := range b.dmCommandHandlers {
-		if strings.HasPrefix(text, prefix) {
+		if strings.HasPrefix(textLower, prefix) {
 			handler(b, event, text)
 			return
 		}
@@ -267,8 +281,11 @@ func (b *Bot) handleMention(event *slackevents.AppMentionEvent) {
 
 	b.logger.Info("Received mention", "user", event.User, "channel", event.Channel, "processed_text", processedText)
 
+	// Convert to lowercase for case-insensitive command matching
+	processedTextLower := strings.ToLower(processedText)
+
 	for prefix, handler := range b.appMentionCommandHandlers {
-		if strings.HasPrefix(processedText, prefix) {
+		if strings.HasPrefix(processedTextLower, prefix) {
 			handler(b, event, processedText)
 			return
 		}
@@ -489,6 +506,108 @@ func (b *Bot) processVacationCommandLogic(input CommandLogicInput) {
 	b.sendMessage(input.ChannelID, confirmationMessage)
 }
 
+// --- OOO Command Logic ---
+
+func (b *Bot) handleOooCommand(event *slackevents.AppMentionEvent, text string) {
+	input := CommandLogicInput{
+		UserID:         event.User,
+		ChannelID:      event.Channel,
+		Text:           text,
+		IsDM:           false,
+		RespondingUser: event.User,
+		BotUserID:      b.botUserID,
+	}
+	b.logger.Info("Processing OOO command (mention)", "user", input.UserID, "text", input.Text)
+	b.processOooCommandLogic(input)
+}
+
+func (b *Bot) handleOooCommandDM(event *slackevents.MessageEvent, text string) {
+	input := CommandLogicInput{
+		UserID:         event.User,
+		ChannelID:      event.Channel,
+		Text:           text,
+		IsDM:           true,
+		RespondingUser: event.User,
+		BotUserID:      b.botUserID,
+	}
+	b.logger.Info("Processing OOO command (DM)", "user", input.UserID, "text", input.Text)
+	b.processOooCommandLogic(input)
+}
+
+func (b *Bot) processOooCommandLogic(input CommandLogicInput) {
+	matches := oooCommandRegex.FindStringSubmatch(input.Text)
+	// Expected: matches[0]=full, matches[1]=targetUserID, matches[2]=fromDate, matches[3]=toDate (optional)
+
+	if matches == nil {
+		var errorMsg string
+		if input.IsDM {
+			errorMsg = "Invalid format. Use: `ooo <@user> YYYY-MM-DD [YYYY-MM-DD]`"
+		} else {
+			errorMsg = fmt.Sprintf("Invalid format. Use: `@%s ooo <@user> YYYY-MM-DD [YYYY-MM-DD]`", input.BotUserID)
+		}
+		b.sendMessage(input.ChannelID, errorMsg)
+		return
+	}
+
+	targetUserID := matches[1]
+	fromDateStr := matches[2]
+	toDateStr := matches[3] // This will be empty if not provided
+
+	// If no end date provided, use the same date for both start and end
+	if toDateStr == "" {
+		toDateStr = fromDateStr
+	}
+
+	fromTime, errFrom := time.Parse(dateFormat, fromDateStr)
+	if errFrom != nil {
+		b.sendMessage(input.ChannelID, fmt.Sprintf("Invalid 'from' date format: %s. Use YYYY-MM-DD.", fromDateStr))
+		return
+	}
+	toTime, errTo := time.Parse(dateFormat, toDateStr)
+	if errTo != nil {
+		b.sendMessage(input.ChannelID, fmt.Sprintf("Invalid 'to' date format: %s. Use YYYY-MM-DD.", toDateStr))
+		return
+	}
+	if toTime.Before(fromTime) {
+		b.sendMessage(input.ChannelID, "'To' date cannot be before 'from' date.")
+		return
+	}
+
+	err := b.storage.AddVacationRecord(targetUserID, fromDateStr, toDateStr)
+	if err != nil {
+		b.logger.Error("Failed to insert OOO record", "error", err, "target_user", targetUserID, "requesting_user", input.UserID)
+		b.sendMessage(input.ChannelID, "❌ Failed to record out of office status. Please try again.")
+		return
+	}
+
+	logAction := "recorded OOO"
+	if input.IsDM {
+		logAction = "recorded OOO via DM"
+	}
+	b.logger.Info(fmt.Sprintf("Successfully %s", logAction), "target_user", targetUserID, "from", fromDateStr, "to", toDateStr, "requesting_user", input.UserID)
+
+	var confirmationMessage string
+	if fromDateStr == toDateStr {
+		confirmationMessage = fmt.Sprintf("Recorded out of office for <@%s> on %s.", targetUserID, fromDateStr)
+	} else {
+		confirmationMessage = fmt.Sprintf("Recorded out of office for <@%s> from %s to %s.", targetUserID, fromDateStr, toDateStr)
+	}
+
+	if input.IsDM {
+		confirmationMessage = "✅ " + confirmationMessage
+		var channelNotification string
+		if fromDateStr == toDateStr {
+			channelNotification = fmt.Sprintf("🏖️ <@%s> used DM to record out of office for <@%s> on %s.",
+				input.RespondingUser, targetUserID, fromDateStr)
+		} else {
+			channelNotification = fmt.Sprintf("🏖️ <@%s> used DM to record out of office for <@%s> from %s to %s.",
+				input.RespondingUser, targetUserID, fromDateStr, toDateStr)
+		}
+		b.sendMessage(b.config.Channel, channelNotification)
+	}
+	b.sendMessage(input.ChannelID, confirmationMessage)
+}
+
 // --- WFH Command Logic ---
 
 func (b *Bot) handleWfhCommand(event *slackevents.AppMentionEvent, text string) {
@@ -682,6 +801,25 @@ func (b *Bot) processLunchStatusCommandLogic(channelID, text string, isDM bool, 
 // buildStatusMessage formats the detailed status report.
 func (b *Bot) buildStatusMessage(when, dateStr string, records []storage.LunchRecord, vacationUserIDs []string, wfhUserIDs []string, total int) string {
 	var sb strings.Builder
+
+	// Check if the day is closed
+	isClosed, err := b.storage.IsDateClosed(dateStr)
+	if err != nil {
+		b.logger.Warn("Failed to check if date is closed for status", "error", err, "date", dateStr)
+	}
+
+	if isClosed && err == nil {
+		// Check if it's a weekend
+		parsedTime, parseErr := time.Parse(dateFormat, dateStr)
+		if parseErr == nil && (parsedTime.Weekday() == time.Saturday || parsedTime.Weekday() == time.Sunday) {
+			sb.WriteString(fmt.Sprintf("🚫 %s (%s) is closed (weekend)\n", when, dateStr))
+		} else {
+			sb.WriteString(fmt.Sprintf("🚫 %s (%s) is closed\n", when, dateStr))
+		}
+		sb.WriteString("• Total expected for lunch: 0")
+		return sb.String()
+	}
+
 	sb.WriteString(fmt.Sprintf("📊 Lunch status for %s (%s):\n", when, dateStr))
 	sb.WriteString(fmt.Sprintf("• Baseline: %d\n", b.config.Baseline))
 
@@ -713,9 +851,9 @@ func (b *Bot) buildStatusMessage(when, dateStr string, records []storage.LunchRe
 				}
 			}
 		}
-		sb.WriteString(fmt.Sprintf("• On vacation (%d): %s\n", len(vacationUserIDs), strings.Join(vacationNames, ", ")))
+		sb.WriteString(fmt.Sprintf("• Out of office (%d): %s\n", len(vacationUserIDs), strings.Join(vacationNames, ", ")))
 	} else {
-		sb.WriteString("• On vacation: None\n")
+		sb.WriteString("• Out of office: None\n")
 	}
 
 	if len(wfhUserIDs) > 0 {
@@ -790,4 +928,121 @@ func (b *Bot) sendWarning() {
 func (b *Bot) handleAppHomeOpened(event *slackevents.AppHomeOpenedEvent) {
 	b.logger.Info("App Home opened by user - this is not supported", "user", event.User)
 
+}
+
+// --- Closed Command Logic ---
+
+func (b *Bot) handleClosedCommand(event *slackevents.AppMentionEvent, text string) {
+	input := CommandLogicInput{
+		UserID:         event.User,
+		ChannelID:      event.Channel,
+		Text:           text,
+		IsDM:           false,
+		RespondingUser: event.User,
+		BotUserID:      b.botUserID,
+	}
+	b.logger.Info("Processing closed command (mention)", "user", input.UserID, "text", input.Text)
+	b.processClosedCommandLogic(input)
+}
+
+func (b *Bot) handleClosedCommandDM(event *slackevents.MessageEvent, text string) {
+	input := CommandLogicInput{
+		UserID:         event.User,
+		ChannelID:      event.Channel,
+		Text:           text,
+		IsDM:           true,
+		RespondingUser: event.User,
+		BotUserID:      b.botUserID,
+	}
+	b.logger.Info("Processing closed command (DM)", "user", input.UserID, "text", input.Text)
+	b.processClosedCommandLogic(input)
+}
+
+func (b *Bot) processClosedCommandLogic(input CommandLogicInput) {
+	matches := closedCommandRegex.FindStringSubmatch(input.Text)
+	// Expected: matches[0]=full, matches[1]=date (today, tomorrow, or YYYY-MM-DD), matches[2]=reason (optional)
+
+	if matches == nil {
+		var errorMsg string
+		if input.IsDM {
+			errorMsg = "❌ Invalid format. Use: `closed (today|tomorrow|YYYY-MM-DD) [reason]`"
+		} else {
+			errorMsg = fmt.Sprintf("❌ Invalid format. Use: `@%s closed (today|tomorrow|YYYY-MM-DD) [reason]`", input.BotUserID)
+		}
+		b.sendMessage(input.ChannelID, errorMsg)
+		return
+	}
+
+	when := matches[1]
+	reason := ""
+	if len(matches) > 2 && matches[2] != "" {
+		reason = matches[2]
+	}
+
+	var targetDate time.Time
+	var displayWhen string
+
+	if when == argToday {
+		targetDate = time.Now()
+		displayWhen = argToday
+	} else if when == argTomorrow {
+		targetDate = time.Now().AddDate(0, 0, 1)
+		displayWhen = argTomorrow
+	} else {
+		parsedTime, err := time.Parse(dateFormat, when)
+		if err != nil {
+			b.sendMessage(input.ChannelID, fmt.Sprintf("❌ Invalid date format '%s'. Use 'today', 'tomorrow', or YYYY-MM-DD.", when))
+			return
+		}
+		targetDate = parsedTime
+		displayWhen = when
+	}
+
+	dateStr := targetDate.Format(dateFormat)
+
+	// Check if date is already closed (weekend or already marked)
+	isClosed, err := b.storage.IsDateClosed(dateStr)
+	if err != nil {
+		b.logger.Error("Failed to check if date is closed", "error", err, "date", dateStr)
+		b.sendMessage(input.ChannelID, "❌ Failed to check date status. Please try again.")
+		return
+	}
+
+	if isClosed {
+		// Check if it's a weekend
+		parsedTime, _ := time.Parse(dateFormat, dateStr)
+		if parsedTime.Weekday() == time.Saturday || parsedTime.Weekday() == time.Sunday {
+			b.sendMessage(input.ChannelID, fmt.Sprintf("ℹ️ %s (%s) is already closed (weekend).", displayWhen, dateStr))
+		} else {
+			b.sendMessage(input.ChannelID, fmt.Sprintf("ℹ️ %s (%s) is already marked as closed.", displayWhen, dateStr))
+		}
+		return
+	}
+
+	err = b.storage.AddClosedDay(dateStr, reason)
+	if err != nil {
+		b.logger.Error("Failed to mark day as closed", "error", err, "date", dateStr, "user", input.UserID)
+		b.sendMessage(input.ChannelID, "❌ Failed to mark day as closed. Please try again.")
+		return
+	}
+
+	logAction := "marked day as closed"
+	if input.IsDM {
+		logAction = "marked day as closed via DM"
+	}
+	b.logger.Info(fmt.Sprintf("Successfully %s", logAction), "date", dateStr, "reason", reason, "user", input.UserID)
+
+	confirmationMessage := fmt.Sprintf("✅ %s (%s) marked as closed.", displayWhen, dateStr)
+	if reason != "" {
+		confirmationMessage += fmt.Sprintf(" Reason: %s", reason)
+	}
+
+	if input.IsDM {
+		channelNotification := fmt.Sprintf("🚫 <@%s> used DM to mark %s (%s) as closed.", input.UserID, displayWhen, dateStr)
+		if reason != "" {
+			channelNotification += fmt.Sprintf(" Reason: %s", reason)
+		}
+		b.sendMessage(b.config.Channel, channelNotification)
+	}
+	b.sendMessage(input.ChannelID, confirmationMessage)
 }

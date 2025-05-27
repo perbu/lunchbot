@@ -151,7 +151,43 @@ func (s *Storage) GetWfhForDate(date string) ([]string, error) {
 	return s.queries.GetWfhForDate(context.Background(), date)
 }
 
+func (s *Storage) AddClosedDay(date, reason string) error {
+	return s.queries.AddClosedDay(context.Background(), AddClosedDayParams{
+		Date:   date,
+		Reason: sql.NullString{String: reason, Valid: reason != ""},
+	})
+}
+
+func (s *Storage) IsDateClosed(date string) (bool, error) {
+	parsedTime, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return false, fmt.Errorf("invalid date format: %w", err)
+	}
+
+	// Check if it's a weekend (Saturday or Sunday)
+	if parsedTime.Weekday() == time.Saturday || parsedTime.Weekday() == time.Sunday {
+		return true, nil
+	}
+
+	// Check if date is explicitly marked as closed
+	count, err := s.queries.IsDateClosed(context.Background(), date)
+	if err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
+}
+
 func (s *Storage) CalculateTotal(date string, baseline int) (int, error) {
+	// Check if date is closed
+	isClosed, err := s.IsDateClosed(date)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check if date is closed: %w", err)
+	}
+	if isClosed {
+		return 0, nil
+	}
+
 	total := baseline
 
 	// Get lunch changes
