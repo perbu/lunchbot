@@ -202,10 +202,6 @@ func (b *Bot) StartScheduler(ctx context.Context) {
 				b.logger.Info("Scheduler: Time for daily report", "time", now)
 				b.sendDailyReport()
 			}
-			if now.Hour() == 9 && now.Minute() == 50 {
-				b.logger.Info("Scheduler: Time for warning", "time", now)
-				b.sendWarning()
-			}
 		}
 	}
 }
@@ -913,15 +909,6 @@ func (b *Bot) sendDailyReport() {
 	b.logger.Info("Sending daily report", "date", todayInLocation, "total", total, "report_user", b.config.ReportUser)
 	message := fmt.Sprintf("🗓️ Daily lunch report for %s: %d people expected.", todayInLocation, total)
 	b.sendMessage(b.config.ReportUser, message)
-}
-
-func (b *Bot) sendWarning() {
-	if b.config.Channel == "" {
-		b.logger.Error("Cannot send warning, main channel (b.config.Channel) not configured.")
-		return
-	}
-	b.logger.Info("Sending lunch order warning", "channel", b.config.Channel)
-	b.sendMessage(b.config.Channel, "⚠️ Reminder: Lunch order closes in 10 minutes!")
 }
 
 // handleAppHomeOpened constructs and publishes the App Home view.
